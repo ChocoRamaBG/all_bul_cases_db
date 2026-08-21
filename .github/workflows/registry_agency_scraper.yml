@@ -20,20 +20,21 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: "pip"
+          cache-dependency-path: "requirements.txt"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --disable-pip-version-check playwright
+          python -m pip install -r requirements.txt
 
       - name: Install Playwright Chromium
         run: |
@@ -75,8 +76,6 @@ jobs:
 
           git commit -m "Auto-save registry agency scraper state"
 
-          # Rebase in case another scheduled/manual run committed while this
-          # job was running. Do not lose the state we just produced.
           git pull --rebase origin main
           git push origin HEAD:main
 
