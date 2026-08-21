@@ -1,0 +1,93 @@
+name: "(registry_agency) Autonomous Name Scraper"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+concurrency:
+  group: registry-agency-name-scraper
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --disable-pip-version-check playwright
+
+      - name: Install Playwright Chromium
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Run registry scraper
+        env:
+          PYTHONUNBUFFERED: "1"
+          HEADLESS: "true"
+        run: python -u scraper_registry_agency.py
+
+      - name: Show saved state
+        if: always()
+        run: |
+          echo "===== Output files ====="
+          find registry_agency_outputs -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort || true
+          echo "===== Savegame ====="
+          cat registry_agency_outputs/savegame_registry_agency.json 2>/dev/null || true
+          echo "===== Continue flag ====="
+          cat registry_agency_outputs/CONTINUE_FLAG_REGISTRY_AGENCY 2>/dev/null || true
+
+      - name: Commit scraper progress
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p registry_agency_outputs
+
+          git add -f registry_agency_outputs/100_percent_valid_uics.txt || true
+          git add -f registry_agency_outputs/processed_queries.txt || true
+          git add -f registry_agency_outputs/savegame_registry_agency.json || true
+          git add -f registry_agency_outputs/CONTINUE_FLAG_REGISTRY_AGENCY || true
+
+          if git diff --cached --quiet; then
+            echo "No scraper state/data changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Auto-save registry agency scraper state"
+
+          # Rebase in case another scheduled/manual run committed while this
+          # job was running. Do not lose the state we just produced.
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: Trigger next run when continuation is required
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f "registry_agency_outputs/CONTINUE_FLAG_REGISTRY_AGENCY" ]; then
+            echo "Continue flag detected. Starting another workflow run..."
+            gh workflow run "(registry_agency) Autonomous Name Scraper" --ref main
+          else
+            echo "No continue flag. No follow-up run required."
+          fi
