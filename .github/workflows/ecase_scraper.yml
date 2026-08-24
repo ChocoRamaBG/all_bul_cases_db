@@ -1,0 +1,74 @@
+name: "(ecase.justice.bg) Autonomous Registry Scraper"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *' # Стартира всеки ден в 03:00 UTC
+
+concurrency:
+  group: ecase-scraper
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # Увери се, че директорията съвпада с името на репозиторито или папката ти
+        working-directory: ./
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies & Playwright Browsers
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          playwright install chromium --with-deps
+
+      - name: Execute Autonomous Deep Scrape
+        run: python scraper_ecase.py
+
+      - name: Commit Progress Tracker and Data
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          mkdir -p ecase_outputs
+          touch ecase_outputs/memory.json
+          
+          # Индексиране на всички файлове от изхода
+          git add ecase_outputs/memory.json || true
+          git add ecase_outputs/savegame_ecase.json || true
+          git add ecase_outputs/errors.jsonl || true
+          git add ecase_outputs/*.csv || true
+          
+          if git diff --staged --quiet; then
+            echo "No new changes to commit."
+          else
+            git commit -m "Auto-save state: Update ecase.justice.bg extracted data"
+            git pull --rebase origin main
+            git push
+          fi
+
+      - name: Check Continue Flag and Trigger Next Run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f "ecase_outputs/CONTINUE_FLAG_ECASE" ]; then
+            echo "Continue flag detected. Script hit time limit. Triggering next workflow run..."
+            gh workflow run "(ecase.justice.bg) Autonomous Registry Scraper"
+          else
+            echo "No continue flag detected. Scraping is 100% complete."
+          fi
