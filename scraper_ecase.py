@@ -16,8 +16,8 @@ TIME_LIMIT_SECONDS = 5.4 * 60 * 60  # ~5 часа и 24 минути
 MASTER_URL = "https://ecase.justice.bg/Case"
 BASE_URL = "https://ecase.justice.bg"
 MASTER_PAGE_SIZE = "50"
-DELAY_BETWEEN_CASES_MS = 100
-DELAY_AFTER_AJAX_MS = 150
+DELAY_BETWEEN_CASES_MS = 3500  # УВЕЛИЧЕНО: 3.5 секунди за да не ядеш банана
+DELAY_AFTER_AJAX_MS = 500      # УВЕЛИЧЕНО: 0.5 секунди за стабилност
 
 # ============================================================
 # ПЪТИЩА И ДИРЕКТОРИИ
@@ -340,10 +340,12 @@ def extract_master_card(anchor):
     return card
 
 def ensure_case_loaded(page):
-    page.wait_for_selector("#caseTabSides", state="attached", timeout=20000)
     try:
-        page.wait_for_selector("#gvSides .list__item", state="visible", timeout=8000)
+        # ПРАВИЛНИЯТ НАЧИН: чакаме макс 8 секунди, ако го няма - не крашваме, гащник!
+        page.wait_for_selector("#caseTabSides", state="attached", timeout=8000)
+        page.wait_for_selector("#gvSides .list__item", state="visible", timeout=5000)
     except PlaywrightTimeoutError:
+        print("[WARN] Секцията със страните не зареди (възможно е скрито дело). Продължаваме напред.")
         pass
 
 def click_case_from_master(master, context, anchor):
@@ -379,7 +381,9 @@ def read_sides(page, meta):
             page.wait_for_timeout(DELAY_AFTER_AJAX_MS)
             page.wait_for_selector("#gvSides .list__item", state="visible", timeout=15000)
         except Exception as e:
-            raise RuntimeError(f"Sides pagination failed: {e}")
+            # Ако не успее пагинацията, по-добре да върнем каквото сме събрали до момента
+            print(f"[WARN] Sides pagination failed: {e}")
+            break
     return rows
 
 def click_tab(page, tab_text, panel_selector):
@@ -510,7 +514,13 @@ def process_case(master_card, master, context, memory):
         if anchor.count() == 0: raise RuntimeError("Case link disappeared from current master page")
         case_page = click_case_from_master(master, context, anchor)
         case_page.wait_for_load_state("domcontentloaded", timeout=25000)
+        
         ensure_case_loaded(case_page)
+        
+        # ЗАЩИТА: Проверяваме дали не сме изяли банана
+        page_text = case_page.content().lower()
+        if "cloudflare" in page_text or "access denied" in page_text or "rate limit" in page_text:
+            raise RuntimeError("Детектиран IP Ban / Защита. Спираме обработката на това дело.")
 
         meta = case_metadata(case_page, gid)
         parties = read_sides(case_page, meta)
@@ -553,7 +563,7 @@ def main():
     memory = load_memory()
 
     print("=" * 78)
-    print("eCase AUTONOMOUS FULL SCRAPER - MAXIMUM SPEED")
+    print("eCase AUTONOMOUS FULL SCRAPER - STABLE SPEED")
     print("=" * 78)
     print(f"Output directory: {OUTPUT_DIR}")
     print(f"Already completed: {len(memory)} cases")
