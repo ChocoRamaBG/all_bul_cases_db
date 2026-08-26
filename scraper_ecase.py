@@ -16,8 +16,8 @@ TIME_LIMIT_SECONDS = 5.4 * 60 * 60  # ~5 часа и 24 минути
 MASTER_URL = "https://ecase.justice.bg/Case"
 BASE_URL = "https://ecase.justice.bg"
 MASTER_PAGE_SIZE = "50"
-DELAY_BETWEEN_CASES_MS = 3500  # УВЕЛИЧЕНО: 3.5 секунди за да не ядеш банана
-DELAY_AFTER_AJAX_MS = 500      # УВЕЛИЧЕНО: 0.5 секунди за стабилност
+DELAY_BETWEEN_CASES_MS = 3500  
+DELAY_AFTER_AJAX_MS = 500      
 
 # ============================================================
 # ПЪТИЩА И ДИРЕКТОРИИ
@@ -247,7 +247,7 @@ def master_next(page):
         return False
 
 # ============================================================
-# ЕКСТРАКЦИЯ НА ДАННИ (МЕТАДАННИ, СТРАНИ И Т.Н.)
+# ЕКСТРАКЦИЯ НА ДАННИ
 # ============================================================
 def case_metadata(page, gid):
     data = {
@@ -341,7 +341,6 @@ def extract_master_card(anchor):
 
 def ensure_case_loaded(page):
     try:
-        # ПРАВИЛНИЯТ НАЧИН: чакаме макс 8 секунди, ако го няма - не крашваме, гащник!
         page.wait_for_selector("#caseTabSides", state="attached", timeout=8000)
         page.wait_for_selector("#gvSides .list__item", state="visible", timeout=5000)
     except PlaywrightTimeoutError:
@@ -381,7 +380,6 @@ def read_sides(page, meta):
             page.wait_for_timeout(DELAY_AFTER_AJAX_MS)
             page.wait_for_selector("#gvSides .list__item", state="visible", timeout=15000)
         except Exception as e:
-            # Ако не успее пагинацията, по-добре да върнем каквото сме събрали до момента
             print(f"[WARN] Sides pagination failed: {e}")
             break
     return rows
@@ -505,7 +503,7 @@ def persist_case(master_card, meta, parties, assignments, hearings, acts, connec
 
 def process_case(master_card, master, context, memory):
     gid = master_card["gid"]
-    if gid in memory: return True
+    if gid in memory: return True, 1
 
     print(f"\n[CASE] {master_card['case_number']}/{master_card['year']} | {gid}")
     case_page = None
@@ -517,7 +515,6 @@ def process_case(master_card, master, context, memory):
         
         ensure_case_loaded(case_page)
         
-        # ЗАЩИТА: Проверяваме дали не сме изяли банана
         page_text = case_page.content().lower()
         if "cloudflare" in page_text or "access denied" in page_text or "rate limit" in page_text:
             raise RuntimeError("Детектиран IP Ban / Защита. Спираме обработката на това дело.")
@@ -535,16 +532,18 @@ def process_case(master_card, master, context, memory):
         memory.add(gid)
         save_memory(memory)
 
+        total_items = len(parties) + len(assignments) + len(hearings) + len(acts) + len(connected)
+
         print(
             f"[SUCCESS] {gid} | parties={len(parties)} | "
             f"assignments={len(assignments)} | hearings={len(hearings)} | "
             f"acts={len(acts)} | connected={len(connected)}"
         )
-        return True
+        return True, total_items
     except Exception as e:
         print(f"[ERROR] {gid}: {e}")
         log_error(gid, "process_case", e)
-        return False
+        return False, 0
     finally:
         if case_page is not None:
             try: case_page.close()
@@ -571,14 +570,12 @@ def main():
     print("=" * 78)
 
     with sync_playwright() as p:
-        # headless=True за сървърна среда (GitHub Actions)
         browser = p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
         )
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         
-        # Блокиране на излишни мрежови ресурси за по-бързо рендиране
         context.route("**/*", lambda route: route.continue_() if route.request.resource_type not in ["image", "font", "media"] else route.abort())
         
         master = context.new_page()
@@ -593,17 +590,22 @@ def main():
 
             current_page = state["current_page"]
 
-            # Бързо превъртане (fast-forward) до запазената страница
+            # Бързо превъртане (Fast-Forward Protection)
             if current_page > 1:
                 print(f"[INFO] Fast-forwarding pagination to page {current_page}...")
                 actual_page = 1
                 while actual_page < current_page:
                     if not master_next(master):
-                        print("[ERROR] Failed to fast-forward. Breaking pagination catch-up.")
+                        print("[ERROR] Failed to fast-forward (Network/IP Block). Рестартираме за ново IP...")
+                        flag_for_continuation()
                         break
                     actual_page += 1
                     if actual_page % 10 == 0:
                         print(f"  -> Reached page {actual_page}")
+                
+                if actual_page < current_page:
+                    print("\n[INFO] Fast-forward прекъснато. Чакаме GitHub Actions да рестартира.")
+                    return
 
             while current_page <= total_pages:
                 if time_limit_reached():
@@ -622,6 +624,8 @@ def main():
                     if card: cards.append(card)
 
                 time_limit_hit_in_profiles = False
+                empty_cases_streak = 0  # Тракване на Shadow Ban
+                
                 for index, card in enumerate(cards, 1):
                     if time_limit_reached():
                         print("[INFO] Лимитът на времето е достигнат по време на обхождане на профили.")
@@ -634,7 +638,20 @@ def main():
                         continue
                         
                     print(f"[QUEUE] {index}/{len(cards)}")
-                    process_case(card, master, context, memory)
+                    
+                    success, items_count = process_case(card, master, context, memory)
+                    
+                    # Логика за детектване на Shadow Ban
+                    if not success or items_count == 0:
+                        empty_cases_streak += 1
+                    else:
+                        empty_cases_streak = 0
+                        
+                    if empty_cases_streak >= 4:
+                        print("[ERROR] 4 поредни празни/гръмнали дела! Shadow-ban детектиран. Рестартираме сесията през GitHub Actions...")
+                        flag_for_continuation()
+                        time_limit_hit_in_profiles = True
+                        break
 
                 if time_limit_hit_in_profiles:
                     break
@@ -643,7 +660,16 @@ def main():
                     break
                     
                 if not master_next(master):
-                    print("[STOP] Could not advance master pagination.")
+                    # Auto-Restart при умряла пагинация
+                    btn = master.locator("#gvMain li.page-next:not(.page-inactive) a.page-link")
+                    if btn.count() > 0:
+                        print("[STOP] Пагинацията гръмна (Timeout), но реално има още страници (IP Ban). Рестартираме...")
+                        current_page += 1
+                        state["current_page"] = current_page
+                        save_state()
+                        flag_for_continuation()
+                    else:
+                        print("[STOP] Няма повече страници в мастър изгледа.")
                     break
                     
                 current_page += 1
