@@ -35,7 +35,7 @@ ERROR_FILE = os.path.join(OUTPUT_DIR, "errors.jsonl")
 STATE_FILE = os.path.join(OUTPUT_DIR, "savegame_ecase.json")
 CONTINUE_FLAG_FILE = os.path.join(OUTPUT_DIR, "CONTINUE_FLAG_ECASE")
 
-MAX_FILE_SIZE_BYTES = 90 * 1024 * 1024  # 90 MB (Safe threshold for GitHub's 100 MB limit)
+MAX_FILE_SIZE_BYTES = 90 * 1024 * 1024  # 90 MB
 
 FILES = {
     "cases": os.path.join(OUTPUT_DIR, "cases.csv"),
@@ -85,7 +85,7 @@ UUID_RE = re.compile(
 )
 
 # ============================================================
-# УПРАВЛЕНИЕ НА ВРЕМЕТО И СЪСТОЯНИЕТО (STATE)
+# УПРАВЛЕНИЕ НА ВРЕМЕТО И СЪСТОЯНИЕТО
 # ============================================================
 def time_limit_reached():
     return (time.time() - START_TIME) >= TIME_LIMIT_SECONDS
@@ -120,7 +120,7 @@ def save_state():
         print(f"[ERROR] Неуспешен запис на state файл: {e}")
 
 # ============================================================
-# ПОМОЩНИ ФУНКЦИИ ЗА ДАННИ И ФАЙЛОВЕ
+# ПОМОЩНИ ФУНКЦИИ
 # ============================================================
 def clean(text):
     if text is None:
@@ -141,7 +141,6 @@ def load_memory():
             data = json.load(f)
         return set(data) if isinstance(data, list) else set()
     except Exception:
-        print("[WARNING] memory.json is unreadable. Starting with empty memory.")
         return set()
 
 def save_memory(memory):
@@ -161,7 +160,6 @@ def log_error(gid, stage, error):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 def get_active_csv_path(kind):
-    """Връща път към файла, който не надвишава лимита. Ако е пълен, създава нов суфикс."""
     base_path = FILES[kind]
     if not os.path.exists(base_path) or os.path.getsize(base_path) < MAX_FILE_SIZE_BYTES:
         return base_path
@@ -175,19 +173,15 @@ def get_active_csv_path(kind):
         idx += 1
 
 def ensure_csv(path, kind):
-    """Създава CSV файл с хедъри, ако не съществува или е празен."""
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             csv.writer(f).writerow(CSV_HEADERS[kind])
 
 def append_rows(kind, rows):
-    """Добавя редове, като автоматично разделя файловете при достигане на размера."""
     if not rows:
         return
-    
     active_path = get_active_csv_path(kind)
     ensure_csv(active_path, kind)
-    
     with open(active_path, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerows(rows)
@@ -234,11 +228,11 @@ def set_master_page_size(page):
         ):
             select.select_option(MASTER_PAGE_SIZE)
         page.wait_for_timeout(DELAY_AFTER_AJAX_MS)
-        page.wait_for_selector("#gvMain .list__item a.case-card", timeout=20000)
+        page.wait_for_selector("#gvMain .list__item a.case-card", timeout=40000)
     except PlaywrightTimeoutError:
-        pass
+        print(f"[WARNING] Timeout докато се настройваше page size на {MASTER_PAGE_SIZE}.")
     except Exception as e:
-        print(f"[WARNING] Could not set master page size to {MASTER_PAGE_SIZE}: {e}")
+        print(f"[WARNING] Could not set master page size: {e}")
 
 def master_total_pages(page):
     location = page_location(page.locator("#gvMain .page-location").first)
@@ -256,11 +250,11 @@ def master_next(page):
     try:
         with page.expect_response(
             lambda r: "/Case/LoadData" in r.url and r.status == 200,
-            timeout=30000,
+            timeout=40000,
         ):
             btn.click()
         page.wait_for_timeout(DELAY_AFTER_AJAX_MS)
-        page.wait_for_selector("#gvMain .list__item a.case-card", timeout=20000)
+        page.wait_for_selector("#gvMain .list__item a.case-card", timeout=40000)
         return True
     except Exception as e:
         print(f"[ERROR] Master pagination failed: {e}")
@@ -361,15 +355,15 @@ def extract_master_card(anchor):
 
 def ensure_case_loaded(page):
     try:
-        page.wait_for_selector("#caseTabSides", state="attached", timeout=8000)
-        page.wait_for_selector("#gvSides .list__item", state="visible", timeout=5000)
+        page.wait_for_selector("#caseTabSides", state="attached", timeout=15000)
+        page.wait_for_selector("#gvSides .list__item", state="visible", timeout=10000)
     except PlaywrightTimeoutError:
         print("[WARN] Секцията със страните не зареди (възможно е скрито дело). Продължаваме напред.")
         pass
 
 def click_case_from_master(master, context, anchor):
     try:
-        with context.expect_page(timeout=15000) as page_info:
+        with context.expect_page(timeout=25000) as page_info:
             anchor.click(modifiers=["Control"])
         return page_info.value
     except PlaywrightTimeoutError:
@@ -416,12 +410,12 @@ def click_tab(page, tab_text, panel_selector):
         if endpoint:
             try:
                 with page.expect_response(
-                    lambda r: endpoint in r.url and r.status == 200, timeout=15000,
+                    lambda r: endpoint in r.url and r.status == 200, timeout=20000,
                 ): btn.click()
             except PlaywrightTimeoutError: btn.click()
         else: btn.click()
         page.wait_for_timeout(DELAY_AFTER_AJAX_MS)
-        page.wait_for_selector(panel_selector, state="attached", timeout=10000)
+        page.wait_for_selector(panel_selector, state="attached", timeout=15000)
         return True
     except: return False
 
@@ -531,7 +525,7 @@ def process_case(master_card, master, context, memory):
         anchor = master.locator(f"#gvMain a.case-card[href*='{gid}']").first
         if anchor.count() == 0: raise RuntimeError("Case link disappeared from current master page")
         case_page = click_case_from_master(master, context, anchor)
-        case_page.wait_for_load_state("domcontentloaded", timeout=25000)
+        case_page.wait_for_load_state("domcontentloaded", timeout=40000)
         
         ensure_case_loaded(case_page)
         
@@ -583,7 +577,7 @@ def main():
     memory = load_memory()
 
     print("=" * 78)
-    print("eCase AUTONOMOUS FULL SCRAPER - CHUNKED OUTPUTS")
+    print("eCase AUTONOMOUS FULL SCRAPER - CHUNKED OUTPUTS & RETRIES")
     print("=" * 78)
     print(f"Output directory: {OUTPUT_DIR}")
     print(f"Max File Size Limit: {MAX_FILE_SIZE_BYTES / (1024 * 1024):.1f} MB")
@@ -603,8 +597,30 @@ def main():
         master = context.new_page()
 
         try:
-            master.goto(MASTER_URL, wait_until="domcontentloaded", timeout=30000)
-            master.wait_for_selector("#gvMain .list__item a.case-card", state="visible", timeout=20000)
+            # Логика за повторни опити (Retries) при първоначално зареждане
+            load_success = False
+            for attempt in range(3):
+                try:
+                    print(f"[INFO] Зареждане на главната страница (Опит {attempt + 1}/3)...")
+                    master.goto(MASTER_URL, wait_until="domcontentloaded", timeout=60000)
+                    master.wait_for_selector("#gvMain .list__item a.case-card", state="visible", timeout=60000)
+                    load_success = True
+                    break
+                except PlaywrightTimeoutError:
+                    print("[WARN] Таймаут при зареждане. Изчакване 5 секунди преди нов опит...")
+                    master.wait_for_timeout(5000)
+            
+            if not load_success:
+                print("[ERROR] Началната страница не успя да зареди след 3 опита. Възможен IP Ban или паднал сървър.")
+                try:
+                    page_text = master.content().lower()
+                    if "cloudflare" in page_text or "access denied" in page_text or "rate limit" in page_text:
+                        print("[ERROR] Детектирана е защита (Cloudflare/IP block).")
+                except Exception:
+                    pass
+                print("[INFO] Активиране на флаг за продължение (GitHub Actions ще рестартира сесията)...")
+                flag_for_continuation()
+                return
 
             set_master_page_size(master)
             total_pages = master_total_pages(master)
@@ -612,7 +628,6 @@ def main():
 
             current_page = state["current_page"]
 
-            # Бързо превъртане (Fast-Forward Protection)
             if current_page > 1:
                 print(f"[INFO] Fast-forwarding pagination to page {current_page}...")
                 actual_page = 1
@@ -635,7 +650,13 @@ def main():
                     flag_for_continuation()
                     break
 
-                master.wait_for_selector("#gvMain .list__item a.case-card", state="visible", timeout=20000)
+                try:
+                    master.wait_for_selector("#gvMain .list__item a.case-card", state="visible", timeout=60000)
+                except PlaywrightTimeoutError:
+                    print("[ERROR] Таймаут при изчакване на делата. Възможно блокиране или претоварване. Рестартираме...")
+                    flag_for_continuation()
+                    break
+
                 anchors = master.locator("#gvMain .list__item a.case-card")
                 count = anchors.count()
                 print(f"\n[MASTER] Page {current_page:,}/{total_pages:,} | {count} cases")
@@ -646,7 +667,7 @@ def main():
                     if card: cards.append(card)
 
                 time_limit_hit_in_profiles = False
-                empty_cases_streak = 0  # Тракване на Shadow Ban
+                empty_cases_streak = 0
                 
                 for index, card in enumerate(cards, 1):
                     if time_limit_reached():
@@ -663,14 +684,13 @@ def main():
                     
                     success, items_count = process_case(card, master, context, memory)
                     
-                    # Логика за детектване на Shadow Ban
                     if not success or items_count == 0:
                         empty_cases_streak += 1
                     else:
                         empty_cases_streak = 0
                         
                     if empty_cases_streak >= 4:
-                        print("[ERROR] 4 поредни празни/гръмнали дела! Shadow-ban детектиран. Рестартираме сесията през GitHub Actions...")
+                        print("[ERROR] 4 поредни празни/гръмнали дела! Shadow-ban детектиран. Рестартираме сесията...")
                         flag_for_continuation()
                         time_limit_hit_in_profiles = True
                         break
@@ -682,7 +702,6 @@ def main():
                     break
                     
                 if not master_next(master):
-                    # Auto-Restart при умряла пагинация
                     btn = master.locator("#gvMain li.page-next:not(.page-inactive) a.page-link")
                     if btn.count() > 0:
                         print("[STOP] Пагинацията гръмна (Timeout), но реално има още страници (IP Ban). Рестартираме...")
