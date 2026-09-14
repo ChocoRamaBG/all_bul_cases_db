@@ -260,6 +260,75 @@ def master_next(page):
         print(f"[ERROR] Master pagination failed: {e}")
         return False
 
+def jump_via_interception(master, target_page):
+    """Опитва директно манипулиране на AJAX заявката за скок до желаната страница (Network Intercept)."""
+    print(f"[INFO] Опит за мрежов скок до страница {target_page}...")
+    jumped = [False]
+    
+    def handle_route(route):
+        req = route.request
+        if "/Case/LoadData" in req.url and req.method == "POST":
+            post_data = req.post_data
+            if post_data and not jumped[0]:
+                import urllib.parse
+                try:
+                    parsed = urllib.parse.parse_qs(post_data)
+                    modified = False
+                    
+                    # За DataTables payload
+                    if 'start' in parsed and 'length' in parsed:
+                        length = int(parsed['length'][0])
+                        parsed['start'] = [str((target_page - 1) * length)]
+                        modified = True
+                        
+                    # За стандартен MVC / Kendo payload
+                    for key in parsed.keys():
+                        if key.lower() in ['page', 'pageindex', 'pagenumber', 'currentpage']:
+                            parsed[key] = [str(target_page)]
+                            modified = True
+                            
+                    if modified:
+                        new_data = urllib.parse.urlencode(parsed, doseq=True)
+                        route.continue_(post_data=new_data)
+                        jumped[0] = True
+                        return
+                except Exception:
+                    pass
+                
+                # Fallback за JSON payload
+                if "{" in post_data:
+                    try:
+                        import json as j
+                        data = j.loads(post_data)
+                        modified = False
+                        for key in list(data.keys()):
+                            if key.lower() in ['page', 'pageindex', 'pagenumber', 'currentpage']:
+                                data[key] = target_page
+                                modified = True
+                        if modified:
+                            route.continue_(post_data=j.dumps(data))
+                            jumped[0] = True
+                            return
+                    except Exception:
+                        pass
+                        
+        route.continue_()
+        
+    master.route("**/Case/LoadData*", handle_route)
+    
+    try:
+        with master.expect_response(lambda r: "/Case/LoadData" in r.url and r.status == 200, timeout=30000):
+            master.locator("#gvMain li.page-next:not(.page-inactive) a.page-link").click()
+            
+        master.wait_for_timeout(1000)
+        master.wait_for_selector("#gvMain .list__item a.case-card", timeout=20000)
+        return jumped[0]
+    except Exception as e:
+        print(f"[WARN] Intercept Jump failed: {e}")
+        return False
+    finally:
+        master.unroute("**/Case/LoadData*", handle_route)
+
 # ============================================================
 # ЕКСТРАКЦИЯ НА ДАННИ
 # ============================================================
@@ -577,7 +646,7 @@ def main():
     memory = load_memory()
 
     print("=" * 78)
-    print("eCase AUTONOMOUS FULL SCRAPER - CHUNKED OUTPUTS & RETRIES")
+    print("eCase AUTONOMOUS FULL SCRAPER - CHUNKED OUTPUTS & SMART RETRIES")
     print("=" * 78)
     print(f"Output directory: {OUTPUT_DIR}")
     print(f"Max File Size Limit: {MAX_FILE_SIZE_BYTES / (1024 * 1024):.1f} MB")
@@ -597,7 +666,6 @@ def main():
         master = context.new_page()
 
         try:
-            # Логика за повторни опити (Retries) при първоначално зареждане
             load_success = False
             for attempt in range(3):
                 try:
@@ -611,14 +679,7 @@ def main():
                     master.wait_for_timeout(5000)
             
             if not load_success:
-                print("[ERROR] Началната страница не успя да зареди след 3 опита. Възможен IP Ban или паднал сървър.")
-                try:
-                    page_text = master.content().lower()
-                    if "cloudflare" in page_text or "access denied" in page_text or "rate limit" in page_text:
-                        print("[ERROR] Детектирана е защита (Cloudflare/IP block).")
-                except Exception:
-                    pass
-                print("[INFO] Активиране на флаг за продължение (GitHub Actions ще рестартира сесията)...")
+                print("[ERROR] Началната страница не успя да зареди след 3 опита.")
                 flag_for_continuation()
                 return
 
@@ -628,16 +689,33 @@ def main():
 
             current_page = state["current_page"]
 
+            # Бързо превъртане (Smart Fast-Forward)
             if current_page > 1:
                 print(f"[INFO] Fast-forwarding pagination to page {current_page}...")
                 actual_page = 1
+                
+                # 1. Опит за директен мрежов скок (Network Interception Jump)
+                jump_success = False
+                try:
+                    jump_success = jump_via_interception(master, current_page)
+                    if jump_success:
+                        print(f"[SUCCESS] Успешен директен скок до страница {current_page} чрез Network Intercept!")
+                        actual_page = current_page
+                except Exception as e:
+                    print(f"[WARN] Мрежовият скок пропадна ({e}). Преминаване към последователно прелистване...")
+
+                # 2. Sequential fallback ако скокът се провали
                 while actual_page < current_page:
+                    # Добавяме 1.2s delay за да не ядосваме WAF / Cloudflare Rate Limiter
+                    master.wait_for_timeout(1200) 
+                    
                     if not master_next(master):
                         print("[ERROR] Failed to fast-forward (Network/IP Block). Рестартираме за ново IP...")
                         flag_for_continuation()
                         break
+                        
                     actual_page += 1
-                    if actual_page % 10 == 0:
+                    if actual_page % 20 == 0:
                         print(f"  -> Reached page {actual_page}")
                 
                 if actual_page < current_page:
