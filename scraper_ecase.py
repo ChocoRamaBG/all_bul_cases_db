@@ -20,7 +20,7 @@ DELAY_BETWEEN_CASES_MS = 3500
 DELAY_AFTER_AJAX_MS = 500      
 
 # ============================================================
-# ПЪТИЩА И ДИРЕКТОРИИ
+# ПЪТИЩА, ДИРЕКТОРИИ И ЛИМИТИ
 # ============================================================
 try:
     output_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,6 +34,8 @@ MEMORY_FILE = os.path.join(OUTPUT_DIR, "memory.json")
 ERROR_FILE = os.path.join(OUTPUT_DIR, "errors.jsonl")
 STATE_FILE = os.path.join(OUTPUT_DIR, "savegame_ecase.json")
 CONTINUE_FLAG_FILE = os.path.join(OUTPUT_DIR, "CONTINUE_FLAG_ECASE")
+
+MAX_FILE_SIZE_BYTES = 90 * 1024 * 1024  # 90 MB (Safe threshold for GitHub's 100 MB limit)
 
 FILES = {
     "cases": os.path.join(OUTPUT_DIR, "cases.csv"),
@@ -158,17 +160,35 @@ def log_error(gid, stage, error):
     with open(ERROR_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-def ensure_csv(kind):
-    path = FILES[kind]
+def get_active_csv_path(kind):
+    """Връща път към файла, който не надвишава лимита. Ако е пълен, създава нов суфикс."""
+    base_path = FILES[kind]
+    if not os.path.exists(base_path) or os.path.getsize(base_path) < MAX_FILE_SIZE_BYTES:
+        return base_path
+    
+    idx = 1
+    while True:
+        root, ext = os.path.splitext(base_path)
+        suffixed_path = f"{root}_{idx}{ext}"
+        if not os.path.exists(suffixed_path) or os.path.getsize(suffixed_path) < MAX_FILE_SIZE_BYTES:
+            return suffixed_path
+        idx += 1
+
+def ensure_csv(path, kind):
+    """Създава CSV файл с хедъри, ако не съществува или е празен."""
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             csv.writer(f).writerow(CSV_HEADERS[kind])
 
 def append_rows(kind, rows):
+    """Добавя редове, като автоматично разделя файловете при достигане на размера."""
     if not rows:
         return
-    ensure_csv(kind)
-    with open(FILES[kind], "a", newline="", encoding="utf-8-sig") as f:
+    
+    active_path = get_active_csv_path(kind)
+    ensure_csv(active_path, kind)
+    
+    with open(active_path, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerows(rows)
         f.flush()
@@ -557,14 +577,16 @@ def main():
     clear_continuation_flag()
 
     for kind in FILES:
-        ensure_csv(kind)
+        active_path = get_active_csv_path(kind)
+        ensure_csv(active_path, kind)
 
     memory = load_memory()
 
     print("=" * 78)
-    print("eCase AUTONOMOUS FULL SCRAPER - STABLE SPEED")
+    print("eCase AUTONOMOUS FULL SCRAPER - CHUNKED OUTPUTS")
     print("=" * 78)
     print(f"Output directory: {OUTPUT_DIR}")
+    print(f"Max File Size Limit: {MAX_FILE_SIZE_BYTES / (1024 * 1024):.1f} MB")
     print(f"Already completed: {len(memory)} cases")
     print(f"Master page size: {MASTER_PAGE_SIZE}")
     print("=" * 78)
